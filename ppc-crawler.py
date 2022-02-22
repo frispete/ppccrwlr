@@ -52,7 +52,7 @@ class gpar:
     company = __company__
     author = __author__
     license = __license__
-    loglevel = logging.INFO
+    loglevel = logging.WARNING
     logfile = None
     force = False
     # internal
@@ -144,6 +144,14 @@ def frec(rec, withunderscores = True, indent = None):
     return '\n'.join(ret)
 
 
+def unquote(val, quotes = '\'"'):
+    """ unquote string """
+    for quote in quotes:
+        if val[0] == quote and val[-1] == quote:
+            val = val[1:-1]
+    return val
+
+
 def fnfind(pattern, path, follow_symlinks = True):
     """ return all files with names matching pattern recursively """
     try:
@@ -176,32 +184,40 @@ def grep_kv(key, lines, max_result = 0):
     """ simplified grep, that locates key anchored at start of line,
         followed by a colon, and return the value, ignoring white space in between
     """
+    #log.debug(f'grep_kv("{key}", lines, {max_result})')
     result = []
     for line in lines:
-        mo = re.match(f'^{key}\s*:\s*(.*)$', line)
+        mo = re.match(f'^\s*{key}\s*:\s*(.*)$', line)
         if mo:
             result.append(mo.group(1))
             if max_result and len(result) >= max_result:
                 break
     if max_result == 1 and result:
         result = result[0]
+    log.debug(f'grep_kv("{key}", lines, {max_result}): "{result}"')
     return result
 
 
-def extract_lines(start_tag, end_tag, lines):
-    """ extract lines between start and end tag """
+def extract_lines(start_tag, end_tag, lines, offset = 0):
+    """ extract lines between start and end tag, starting at offset """
+    log.debug(f'extract_lines("{start_tag}", "{end_tag}", lines, {offset})')
     result = []
+    lnr = 0
     match = False
-    for line in lines:
+    for lnr, line in enumerate(lines):
+        if lnr < offset:
+            continue
+        #log.debug(f'{lnr}: {line}')
         if not match:
             if re.match(start_tag, line):
                 match = True
         else:
             if re.match(end_tag, line):
                 match = False
+                break
             else:
                 result.append(line)
-    return result
+    return result, lnr + 1
 
 
 def extract_command(command, lines):
@@ -211,18 +227,10 @@ def extract_command(command, lines):
         ^$
         returns a str, if output is just one line, and a list otherwise
     """
-    result = extract_lines(f'^#\ {command}$', '^$', lines)
+    result, _ = extract_lines(f'^#\ {command}$', '^$', lines)
     if len(result) == 1:
         result = result.pop()
     return result
-
-
-def unquote(val, quotes = '\'"'):
-    """ unquote string """
-    for quote in quotes:
-        if val[0] == quote and val[-1] == quote:
-            val = val[1:-1]
-    return val
 
 
 def assign_exp_dict(lines, lowercase = False, comment_skip = '#'):
@@ -276,6 +284,50 @@ class IRQ:
 
 
 @dataclass(init = False)
+class NIC:
+    """ Represent an NIC, fetched from lines
+        21: Virtual IO 00.0: 0200 Ethernet controller
+        [...]
+          Model: "IBM Virtual Ethernet card 0"
+          Vendor: int 0x6001 "IBM"
+          Device: "Virtual Ethernet card 0"
+          Driver: "ibmveth"
+          Driver Modules: "ibmveth"
+          Device File: eth0
+          PROM id: vdevice/l-lan@30000002
+          HW Address: 72:b5:18:50:43:02
+          Permanent HW Address: 72:b5:18:50:43:02
+          Link detected: yes
+          Module Alias: "vio:TnetworkSIBM,l-lan"
+          Driver Info #0:
+            Driver Status: ibmveth is active
+            Driver Activation Cmd: "modprobe ibmveth"
+          Config Status: cfg=no, avail=yes, need=no, active=unknown
+        ^$
+    """
+    model: str
+    driver: str
+    device: str
+    hwaddr: str
+    hwaddrp: str
+    link: bool
+
+    def __init__(self, lines):
+        log.debug(f'NIC({lines})')
+        for label, key, mod in (
+            ('Model', 'model', unquote),
+            ('Driver', 'driver', unquote),
+            ('Device File', 'device', str),
+            ('HW Address', 'hwaddr', str),
+            ('Permanent HW Address', 'hwaddrp', str),
+            ('Link detected', 'link', bool),
+        ):
+            val = grep_kv(f'{label}', lines, 1)
+            #log.debug(f'{label}: {key}: {val}')
+            setattr(self, key, mod(val))
+
+
+@dataclass(init = False)
 class PPC:
     date: str
     hostname: str
@@ -287,6 +339,7 @@ class PPC:
     machine: str
     platform: str
     irq: dict
+    nic: dict
     fw_lvl: str
     fw_dat: str
     fw_img: str
@@ -297,40 +350,45 @@ class PPC:
         self.path = os.path.dirname(fn)
         self.lookup_basic_env()
         lines = open(fn, encoding = 'utf-8', errors = 'surrogateescape').read().splitlines()
-        cpus = list(grep_kv('cpu', lines))
+        cpulist, _ = extract_lines('^\#\ /proc/cpuinfo', '^\#==', lines)
+        log.debug(f'{cpulist}')
+        cpus = list(grep_kv('cpu', cpulist))
+        log.debug(f'{cpus}')
         self.cpu_count = len(cpus)
         self.cpu_type = {cpu for cpu in cpus}
         self.model = grep_kv('model', lines, 1)
         self.machine = grep_kv('machine', lines, 1)
         self.platform = grep_kv('platform', lines, 1)
         self.irq = {}
+        self.nic = {}
         irq_res = grep_kv('irq', lines)
         for irq_des in irq_res:
             irq = IRQ(irq_des)
             if irq.name.startswith('eth'):
                 self.irq[irq.nr] = irq
-        procirq = extract_lines('----- /proc/interrupts -----',
-                                '----- /proc/interrupts end -----', lines)
+        procirq, _ = extract_lines('----- /proc/interrupts -----',
+                                   '----- /proc/interrupts end -----', lines)
         for irq in self.irq.values():
             if irq.name.startswith('eth'):
-                irq_line = grep(f'^\s+{irq.nr}:', procirq, 1)
+                irq_line = grep_kv(f'{irq.nr}', procirq, 1)
                 if irq_line:
                     self.irq_dist(irq, irq_line)
 
+        self.lookup_nic(lines)
         self.lookup_firmware(lines)
-
 
     def irq_dist(self, irq, line):
         """ interpret irq distribution from a line similar to:
-            irq.nr: <array of irqcount/cpu> irq.desc
-                25:  505420892          0.. XICS 655368 Edge      eth0
+            <array of irqcount/cpu> irq.desc
+             505420892          0.. XICS 655368 Edge      eth0
             return a number 0..100, that represents the interrupt distribution
             values towards 0 and poor, towards 100 are good
 
             if 0 < irq/cpu <= 2*irqavg: contribute to irqdist factor
         """
+        log.debug(f'irq_dist({irq}, "{line}"), cpu_count: {self.cpu_count}')
         try:
-            nr, *irqs, desc = line.split(maxsplit = self.cpu_count + 1)
+            *irqs, desc = line.split(maxsplit = self.cpu_count)
         except ValueError:
             log.error(f'/proc/interrupts line malformed: {line}')
             return None
@@ -341,16 +399,31 @@ class PPC:
             irqcount = sum(irqs)
             irqavg = irqcount/self.cpu_count
             cpuf = 100/self.cpu_count
-            log.debug('irqs: %s', irqs)
-            log.debug('irqcount (rec.): %s', irq.count)
-            log.debug('irqcount (calc): %s', irqcount)
-            log.debug('irqcount (avg.): %s', irqavg)
+            log.info(f'irq: {irq.nr}: {irqs}')
+            #log.debug('irqcount (avg.): %s', irqavg)
+            #log.debug('irqcount (rec.): %s', irq.count)
+            #log.debug('irqcount (calc): %s', irqcount)
+            if irq.count != irqcount:
+                log.warning(f'irq({irq.nr}): {irq.count} (rec) != {irqcount} (calc): interrupt count inconsistent')
             for ic in irqs:
                 if 0 < ic <= 2 * irqavg:
                     irqdist += (ic / irqavg) * cpuf
             irqdist = round(irqdist, 1)
             irq.dist = irqdist
-            log.debug('irqcount (dist): %s', irqdist)
+            log.info(f'irq distribution: {irqdist}')
+
+    def lookup_nic(self, lines):
+        """ collect all nics """
+        offset = 0
+        while True:
+            niclines, offset = extract_lines('\d+: .* 0200 Ethernet controller$',
+                                             '^$', lines, offset)
+            log.debug(f'lookup_nic(offset: {offset})')
+            if niclines:
+                nic = NIC(niclines)
+                self.nic[nic.device] = nic
+            else:
+                break
 
     def lookup_firmware(self, lines):
         for var, tag in (
