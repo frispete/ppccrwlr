@@ -152,87 +152,6 @@ def unquote(val, quotes = '\'"'):
     return val
 
 
-def fnfind(pattern, path, follow_symlinks = True):
-    """ return all files with names matching pattern recursively """
-    try:
-        for de in os.scandir(path):
-            if de.is_dir(follow_symlinks = follow_symlinks):
-                for fn in fnfind(pattern, de.path, follow_symlinks):
-                    yield fn
-            if de.is_file(follow_symlinks = follow_symlinks) and fnmatch.fnmatch(de.name, pattern):
-                yield de.path
-    except OSError as e:
-        log.error(e)
-
-
-def grep(regexp, lines, max_result = 0):
-    """ grep through a list of lines and return first match """
-    result = []
-    for line in lines:
-        mo = re.search(regexp, line)
-        if mo:
-            result.append(line)
-            if max_result and len(result) >= max_result:
-                break
-    if max_result == 1 and result:
-        result = result[0]
-    log.debug(f'grep("{regexp}", lines, {max_result}): "{result}"')
-    return result
-
-
-def grep_kv(key, lines, max_result = 0):
-    """ simplified grep, that locates key anchored at start of line,
-        followed by a colon, and return the value, ignoring white space in between
-    """
-    #log.debug(f'grep_kv("{key}", lines, {max_result})')
-    result = []
-    for line in lines:
-        mo = re.match(f'^\s*{key}\s*:\s*(.*)$', line)
-        if mo:
-            result.append(mo.group(1))
-            if max_result and len(result) >= max_result:
-                break
-    if max_result == 1 and result:
-        result = result[0]
-    log.debug(f'grep_kv("{key}", lines, {max_result}): "{result}"')
-    return result
-
-
-def extract_lines(start_tag, end_tag, lines, offset = 0):
-    """ extract lines between start and end tag, starting at offset """
-    log.debug(f'extract_lines("{start_tag}", "{end_tag}", lines, {offset})')
-    result = []
-    lnr = 0
-    match = False
-    for lnr, line in enumerate(lines):
-        if lnr < offset:
-            continue
-        #log.debug(f'{lnr}: {line}')
-        if not match:
-            if re.match(start_tag, line):
-                match = True
-        else:
-            if re.match(end_tag, line):
-                match = False
-                break
-            else:
-                result.append(line)
-    return result, lnr + 1
-
-
-def extract_command(command, lines):
-    """ extract output of a command up to an empty line
-        # cmd
-        output
-        ^$
-        returns a str, if output is just one line, and a list otherwise
-    """
-    result, _ = extract_lines(f'^#\ {command}$', '^$', lines)
-    if len(result) == 1:
-        result = result.pop()
-    return result
-
-
 def assign_exp_dict(lines, lowercase = False, comment_skip = '#'):
     """ return a dict with key value pairs from lines similar to
         var="val"
@@ -254,7 +173,146 @@ def assign_exp_dict(lines, lowercase = False, comment_skip = '#'):
     return d
 
 
-@dataclass(init = False)
+def fnfind(pattern, path, follow_symlinks = True):
+    """ return all files with names matching pattern recursively """
+    try:
+        for de in os.scandir(path):
+            if de.is_dir(follow_symlinks = follow_symlinks):
+                for fn in fnfind(pattern, de.path, follow_symlinks):
+                    yield fn
+            if de.is_file(follow_symlinks = follow_symlinks) and fnmatch.fnmatch(de.name, pattern):
+                yield de.path
+    except OSError as e:
+        log.error(e)
+
+
+class TFS:
+    """ TextFileSearch """
+    def __init__(self, fn, encoding = 'utf-8', errors = 'surrogateescape'):
+        try:
+            self._lines = open(fn, encoding = encoding, errors = errors).read().splitlines()
+        except OSError as e:
+            log.error(e)
+        else:
+            self._fn = fn
+
+    def search(self, regexp, max_result = 0, lines = None):
+        """ search the file and return a list of matches up to max_result
+            * if max_result is not 1, the result is returned as a list, and
+              unpacked from the list, if it is 1 and there's a match
+            * if lines is None, search self._lines
+            * if the regexp contains named grouping elements, the grouping
+              dict is returned, unnamed grouping as a tuple and the matching
+              line otherwise
+        """
+        def collect_result(mo):
+            ret = mo.groupdict()
+            if not ret:
+                ret = mo.groups()
+                if not ret:
+                    ret = mo.group()
+            return ret
+
+        result = []
+        if lines is None:
+            lines = self._lines
+        for line in lines:
+            mo = re.search(regexp, line)
+            if mo:
+                result.append(collect_result(mo))
+                if max_result and len(result) >= max_result:
+                    break
+        if max_result == 1 and result:
+            result = result[0]
+        log.debug(f'TFS.search("{regexp}", lines, {max_result}): "{result}"')
+        return result
+
+    def match_key(self, key, max_result = 0, lines = None, sep = ':'):
+        """ find matches of a space padded key, and return the value part,
+            separated with sep and return a list of matches up to max_result
+            * if lines is None, search self._lines
+            * if max_result is not 1, the result is returned as a list, and
+              unpacked from the list, if it is 1 and there's a match
+        """
+        result = []
+        if lines is None:
+            lines = self._lines
+        for line in lines:
+            mo = re.match(f'^\s*{key}\s*:\s*(.*)$', line)
+            if mo:
+                result.append(mo.group(1))
+                if max_result and len(result) >= max_result:
+                    break
+        if max_result == 1 and result:
+            result = result[0]
+        log.debug(f'TFS.match_key("{key}", lines, {max_result}): "{result}"')
+        return result
+
+    def extract_lines(self, start_tag, end_tag, offset = 0, lines = None):
+        """ extract lines between start and end tag, starting at offset
+            return a list of extracted lines and the current offset, suitable
+            for continuinng the operation
+        """
+        result = []
+        if lines is None:
+            lines = self._lines
+        lnr = 0
+        match = False
+        if offset < len(lines):
+            for lnr, line in enumerate(lines):
+                # fast forward
+                if lnr < offset:
+                    continue
+                #log.debug(f'{lnr}: {line}')
+                # start the search
+                if not match:
+                    if re.match(start_tag, line):
+                        # found a match
+                        match = True
+                else:
+                    if re.match(end_tag, line):
+                        # hit the end tag
+                        match = False
+                        # stop the search
+                        break
+                    else:
+                        # collect result
+                        result.append(line)
+            # prepare for continuation
+            lnr += 1
+        log.debug(f'TFS.extract_lines("{start_tag}", "{end_tag}", {offset}): {result}, {lnr}')
+        return result, lnr
+
+    def extract_command(self, command, double_blank = False, lines = None):
+        """ extract output of a command up to an blank line
+            if double_blank is True, the output is terminated with two consecutive blank lines
+            # cmd
+            output
+            ^$
+            returns a str, if output is just one line, and a list otherwise
+        """
+        if lines is None:
+            lines = self._lines
+        result, offset = self.extract_lines(f'^#\ {command}$', '^$', 0, lines)
+        if double_blank:
+            while True:
+                result.append('')
+                if lines[offset]:
+                    # next line not blank, start on last blank line
+                    output, offset = self.extract_lines('^$', '^$', offset-1, lines)
+                    result.extend(output)
+                else:
+                    # two consecutive blank lines: finished
+                    break
+        if len(result) == 1:
+            result = result.pop()
+        return result
+
+    def __repr__(self):
+        return f'{self.__class__.__name__}({self._fn})'
+
+
+@dataclass
 class IRQ:
     """ Represent an IRQ, interpret a line similar to:
         [irq:]0 19 (1022323346) "655362 Edge      eth0"
@@ -263,27 +321,26 @@ class IRQ:
     nr: int
     count: int
     name: str
-    desc: str
     dist: float = 0.0
 
     def __init__(self, line):
         log.debug(f'IRQ({line})')
         mo = re.match('\d+\s+(?P<nr>\d+)\s+\(\s*(?P<count>\d+)\)\s+"(?P<desc>.*)"', line)
         if mo:
-            gd = mo.groupdict()
+            gdict = mo.groupdict()
             for key, mod in (
                 ('nr', int),
                 ('count', int),
                 ('desc', str)
             ):
-                setattr(self, key, mod(gd[key]))
+                setattr(self, key, mod(gdict[key]))
             try:
                 _, _, self.name = self.desc.split(maxsplit = 2)
             except ValueError:
                 self.name = 'undef.'
 
 
-@dataclass(init = False)
+@dataclass
 class NIC:
     """ Represent an NIC, fetched from lines
         21: Virtual IO 00.0: 0200 Ethernet controller
@@ -312,8 +369,8 @@ class NIC:
     hwaddrp: str
     link: bool
 
-    def __init__(self, lines):
-        log.debug(f'NIC({lines})')
+    def __init__(self, tfs, lines):
+        log.debug(f'NIC({tfs})')
         for label, key, mod in (
             ('Model', 'model', unquote),
             ('Driver', 'driver', unquote),
@@ -322,12 +379,11 @@ class NIC:
             ('Permanent HW Address', 'hwaddrp', str),
             ('Link detected', 'link', bool),
         ):
-            val = grep_kv(f'{label}', lines, 1)
-            #log.debug(f'{label}: {key}: {val}')
+            val = tfs.match_key(f'{label}', 1, lines)
             setattr(self, key, mod(val))
 
 
-@dataclass(init = False)
+@dataclass
 class PPC:
     date: str
     hostname: str
@@ -349,33 +405,33 @@ class PPC:
     def __init__(self, fn):
         self.path = os.path.dirname(fn)
         self.lookup_basic_env()
-        lines = open(fn, encoding = 'utf-8', errors = 'surrogateescape').read().splitlines()
-        cpulist, _ = extract_lines('^\#\ /proc/cpuinfo', '^\#==', lines)
+        tfs = TFS(fn)
+        cpulist = tfs.extract_command('/proc/cpuinfo', double_blank = True)
         log.debug(f'{cpulist}')
-        cpus = list(grep_kv('cpu', cpulist))
+        cpus = list(tfs.match_key('cpu', lines = cpulist))
         log.debug(f'{cpus}')
         self.cpu_count = len(cpus)
         self.cpu_type = {cpu for cpu in cpus}
-        self.model = grep_kv('model', lines, 1)
-        self.machine = grep_kv('machine', lines, 1)
-        self.platform = grep_kv('platform', lines, 1)
+        self.model = tfs.match_key('model', 1)
+        self.machine = tfs.match_key('machine', 1)
+        self.platform = tfs.match_key('platform', 1)
         self.irq = {}
         self.nic = {}
-        irq_res = grep_kv('irq', lines)
+        irq_res = tfs.match_key('irq')
         for irq_des in irq_res:
             irq = IRQ(irq_des)
             if irq.name.startswith('eth'):
                 self.irq[irq.nr] = irq
-        procirq, _ = extract_lines('----- /proc/interrupts -----',
-                                   '----- /proc/interrupts end -----', lines)
+        procirq, _ = tfs.extract_lines('----- /proc/interrupts -----',
+                                       '----- /proc/interrupts end -----')
         for irq in self.irq.values():
             if irq.name.startswith('eth'):
-                irq_line = grep_kv(f'{irq.nr}', procirq, 1)
+                irq_line = tfs.match_key(f'{irq.nr}', 1, procirq)
                 if irq_line:
                     self.irq_dist(irq, irq_line)
 
-        self.lookup_nic(lines)
-        self.lookup_firmware(lines)
+        self.lookup_nic(tfs)
+        self.lookup_firmware(tfs)
 
     def irq_dist(self, irq, line):
         """ interpret irq distribution from a line similar to:
@@ -412,44 +468,42 @@ class PPC:
             irq.dist = irqdist
             log.info(f'irq distribution: {irqdist}')
 
-    def lookup_nic(self, lines):
+    def lookup_nic(self, tfs):
         """ collect all nics """
         offset = 0
         while True:
-            niclines, offset = extract_lines('\d+: .* 0200 Ethernet controller$',
-                                             '^$', lines, offset)
+            niclines, offset = tfs.extract_lines('\d+: .* 0200 Ethernet controller$',
+                                                 '^$', offset)
             log.debug(f'lookup_nic(offset: {offset})')
             if niclines:
-                nic = NIC(niclines)
+                nic = NIC(tfs, niclines)
                 self.nic[nic.device] = nic
             else:
                 break
 
-    def lookup_firmware(self, lines):
+    def lookup_firmware(self, tfs):
         for var, tag in (
             ('fw_lvl', 'Microcode Level.(ML)'),
             ('fw_dat', 'Microcode Build Date.(MG)'),
             ('fw_img', 'Micro Code Image.(MI)'),
         ):
             tag = re.escape(tag)
-            line = grep(f'^\s+{tag}', lines, 1)
-            if line:
-                mo = re.match(f'^\s+{tag}\.+(.*)$', line)
-                if mo:
-                    setattr(self, var, mo.group(1))
+            result = tfs.search(f'^\s+{tag}\.+(.*)$', 1)
+            if result:
+                setattr(self, var, result[0])
 
     def lookup_basic_env(self):
         fn = os.path.join(self.path, 'basic-environment.txt')
         if not os.path.exists(fn):
             return
-        lines = open(fn, encoding = 'utf-8', errors = 'surrogateescape').read().splitlines()
-        date = extract_command('/bin/date', lines)
+        tfs = TFS(fn)
+        date = tfs.extract_command('/bin/date')
         if date:
             self.date = date
-        uname = extract_command('/bin/uname -a', lines)
+        uname = tfs.extract_command('/bin/uname -a')
         if uname:
             _, self.hostname, self.kernel, _ = uname.split(maxsplit = 3)
-        osrel = extract_command('/etc/os-release', lines)
+        osrel = tfs.extract_command('/etc/os-release')
         if osrel:
             d = assign_exp_dict(osrel, True)
             self.os_ver = "{name} {version}".format(**d)
@@ -471,9 +525,10 @@ def process(args):
             # Architecture line. This avoids reading the whole file,
             # if it's not the one, we're looking for..
             for line in open(fn, encoding = 'utf-8'):
-                if gpar.arch in grep_kv('Architecture', [line]):
-                    print(PPC(fn))
-                    print()
+                if line.startswith('Architecture'):
+                    if gpar.arch in line.split():
+                        print(PPC(fn))
+                        print()
                     break
 
     return ret
