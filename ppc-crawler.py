@@ -1,7 +1,5 @@
 #! /usr/bin/env python3
 """
-Synopsis:
-
 Usage: %(appname)s [-hVvf] [-l log] dir..
        -h, --help           this message
        -V, --version        print version and exit
@@ -36,7 +34,6 @@ import getopt
 import pprint
 import fnmatch
 import logging
-import logging.handlers
 import functools
 from dataclasses import dataclass
 
@@ -224,7 +221,7 @@ class TFS:
                     break
         if max_result == 1 and result:
             result = result[0]
-        log.debug(f'TFS.search("{regexp}", lines, {max_result}): "{result}"')
+        log.debug(f'TFS.search("{regexp}", max_result: {max_result}): "{result}"')
         return result
 
     def match_key(self, key, max_result = 0, lines = None, sep = ':'):
@@ -245,7 +242,7 @@ class TFS:
                     break
         if max_result == 1 and result:
             result = result[0]
-        log.debug(f'TFS.match_key("{key}", lines, {max_result}): "{result}"')
+        log.debug(f'TFS.match_key("{key}", max_result: {max_result}, sep: "{sep}"): "{result}"')
         return result
 
     def extract_lines(self, start_tag, end_tag, offset = 0, lines = None):
@@ -280,7 +277,7 @@ class TFS:
                         result.append(line)
             # prepare for continuation
             lnr += 1
-        log.debug(f'TFS.extract_lines("{start_tag}", "{end_tag}", {offset}): {result}, {lnr}')
+        log.debug(f'TFS.extract_lines("{start_tag}", "{end_tag}", offset: {offset}): {result}, {lnr}')
         return result, lnr
 
     def extract_command(self, command, double_blank = False, lines = None):
@@ -306,6 +303,7 @@ class TFS:
                     break
         if len(result) == 1:
             result = result.pop()
+        log.debug(f'TFS.extract_command("{command}", double_blank: {double_blank}): {result}')
         return result
 
     def __repr__(self):
@@ -314,7 +312,7 @@ class TFS:
 
 @dataclass
 class IRQ:
-    """ Represent an IRQ, interpret a line similar to:
+    """ Represent an IRQ, parse a line similar to:
         [irq:]0 19 (1022323346) "655362 Edge      eth0"
         the part is brackets is filtered in calling class
     """
@@ -342,7 +340,7 @@ class IRQ:
 
 @dataclass
 class NIC:
-    """ Represent an NIC, fetched from lines
+    """ Represent an NIC, parsed from lines similar to:
         21: Virtual IO 00.0: 0200 Ethernet controller
         [...]
           Model: "IBM Virtual Ethernet card 0"
@@ -434,13 +432,16 @@ class PPC:
         self.lookup_firmware(tfs)
 
     def irq_dist(self, irq, line):
-        """ interpret irq distribution from a line similar to:
+        """ determine irq distribution from a line similar to:
             <array of irqcount/cpu> irq.desc
              505420892          0.. XICS 655368 Edge      eth0
             return a number 0..100, that represents the interrupt distribution
-            values towards 0 and poor, towards 100 are good
+            values towards 0 are poor, towards 100 are good
 
             if 0 < irq/cpu <= 2*irqavg: contribute to irqdist factor
+
+            if one cpu runs more than twice the average number of interrupts,
+            it's count is discarded
         """
         log.debug(f'irq_dist({irq}, "{line}"), cpu_count: {self.cpu_count}')
         try:
@@ -455,12 +456,10 @@ class PPC:
             irqcount = sum(irqs)
             irqavg = irqcount/self.cpu_count
             cpuf = 100/self.cpu_count
-            log.info(f'irq: {irq.nr}: {irqs}')
-            #log.debug('irqcount (avg.): %s', irqavg)
-            #log.debug('irqcount (rec.): %s', irq.count)
-            #log.debug('irqcount (calc): %s', irqcount)
+            log.info(f'irq: {irq.nr}: {irqs}, total {irqcount}')
+            log.debug(f'irqcount (avg.): {irqavg:.1f}, cpu factor: {cpuf:.2f}')
             if irq.count != irqcount:
-                log.warning(f'irq({irq.nr}): {irq.count} (rec) != {irqcount} (calc): interrupt count inconsistent')
+                log.warning(f'irq({irq.nr}): {irq.count:_} (rec) != {irqcount:_} (calc): interrupt count inconsistent')
             for ic in irqs:
                 if 0 < ic <= 2 * irqavg:
                     irqdist += (ic / irqavg) * cpuf
@@ -482,17 +481,19 @@ class PPC:
                 break
 
     def lookup_firmware(self, tfs):
+        """ fetch firmware values """
         for var, tag in (
             ('fw_lvl', 'Microcode Level.(ML)'),
             ('fw_dat', 'Microcode Build Date.(MG)'),
             ('fw_img', 'Micro Code Image.(MI)'),
         ):
             tag = re.escape(tag)
-            result = tfs.search(f'^\s+{tag}\.+(.*)$', 1)
+            result = tfs.search(f'^\s+{tag}\.+(?P<value>.*)$', 1)
             if result:
-                setattr(self, var, result[0])
+                setattr(self, var, result['value'])
 
     def lookup_basic_env(self):
+        """ fetch general parameter from basic environment """
         fn = os.path.join(self.path, 'basic-environment.txt')
         if not os.path.exists(fn):
             return
@@ -512,7 +513,6 @@ class PPC:
         return '%s(\n%s\n)' % (self.__class__.__name__, frec(self.__dict__))
 
 
-@trace()
 def process(args):
     ret = 0
     log.debug('started with pid %s in %s', os.getpid(), gpar.appdir)
