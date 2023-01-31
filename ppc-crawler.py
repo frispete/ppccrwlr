@@ -1,6 +1,8 @@
 #! /usr/bin/env python3
 """
-Usage: %(appname)s [-hVvf] [-l log] dir..
+Synopsis: Exermine supportconfigs for PPC specific issues
+
+Usage: {appname} [-hVvf] [-l log] dir..
        -h, --help           this message
        -V, --version        print version and exit
        -v, --verbose        verbose mode (cumulative)
@@ -8,20 +10,19 @@ Usage: %(appname)s [-hVvf] [-l log] dir..
        -f, --force          force operation
 
 Description:
-Crawl directories containing supportconfigs for ppc64le cases, and collect some
-hardware aspects in order to recognize some regular appearing issues.
+Crawl directories containing supportconfigs for {arch} cases, and collect some
+setup and hardware configuration aspects in order to recognize and analyse a
+couple of regular appearing issues.
 
-(c)2022 by %(company)s
-Created by %(author)s
-
-License:
-%(license)s
+Copyright: (c)2022-2023 {company}
+Created by: {author}
+License: {license}
 """
 #
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.1'
+__version__ = '0.2'
 __company__ = 'SUSE LLC'
 __author__ = 'Hans-Peter Jansen <hp.jansen@suse.com>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
@@ -30,10 +31,12 @@ __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details
 import os
 import re
 import sys
+import time
 import getopt
 import pprint
 import fnmatch
 import logging
+import datetime
 import functools
 from dataclasses import dataclass
 
@@ -53,56 +56,35 @@ class gpar:
     logfile = None
     force = False
     # internal
+    befn = 'basic-environment.txt'
     hwfn = 'hardware.txt'
+    memfn = 'memory.txt'
+    lparfn = os.path.join('ppc64', 'lparcfg')
+    encoding = 'utf-8'
     arch = 'ppc64le'
 
 
 log = logging.getLogger(gpar.appname)
 
+# add a new loglevel below DEBUG (10) and NOTSET (0)
+logging.TRACE = 5
+logging.addLevelName(logging.TRACE, 'TRACE')
+
+def _trace(self, message, *args, **kws):
+    self.log(logging.TRACE, message, *args, **kws)
+logging.Logger.trace = _trace
+
+
 stdout = lambda *msg: print(*msg, file = sys.stdout, flush = True)
 stderr = lambda *msg: print(*msg, file = sys.stderr, flush = True)
-
-
-class trace:
-    """ Trace decorator class """
-    def __init__(self, loglevel = logging.DEBUG, maxlen = 20):
-        self.loglevel = loglevel
-        self.maxlen = maxlen
-
-    def abbrev(self, arg):
-        if arg:
-            argstr = repr(arg)
-            if len(argstr) > self.maxlen:
-                argstr = argstr[:self.maxlen] + "..'"
-            return argstr
-        return arg
-
-    def argstr(self, *args, **kwargs):
-        arglist = []
-        for arg in args:
-            if arg:
-                arglist.append(self.abbrev(arg))
-        for k, v in kwargs.items():
-            arglist.append('{} = {}'.format(k, self.abbrev(v)))
-        return ', '.join(arglist)
-
-
-    def __call__(self, func):
-        @functools.wraps(func)
-        def trace_and_call(*args, **kwargs):
-            result = func(*args, **kwargs)
-            argstr = self.argstr(*args, **kwargs)
-            logging.log(self.loglevel, '{}({}): {}'.format(func.__name__, argstr, result))
-            return result
-        return trace_and_call
 
 
 def exit(ret = 0, msg = None, usage = False):
     """ Terminate process with optional message and usage """
     if msg:
-        stderr('%s: %s' % (gpar.appname, msg))
+        stderr(f'{gpar.appname}: {msg}')
     if usage:
-        stderr(__doc__ % gpar.__dict__)
+        stderr(__doc__.format(**gpar.__dict__))
     sys.exit(ret)
 
 
@@ -141,6 +123,76 @@ def frec(rec, withunderscores = True, indent = None):
     return '\n'.join(ret)
 
 
+def fsizeof(value, digit = 1, suffix = 'B'):
+    """ return a human readable binary size of value """
+    value = float(value)
+    for unit in ('', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi'):
+        if abs(value) < 1024.0:
+            return f'{value:3.{digit}f} {unit}{suffix}'
+        value /= 1024.0
+    # cap at yotta
+    return f'{value:.{digit}f} Yi{suffix}'
+
+
+def fdeltat(td, short = False, fuzzy = False):
+    """ return a human readable representation of timedelta, int or float values
+        int or float values are expected to be the number of seconds already
+        if fuzzy is true, just return the first value
+    """
+    rv = []
+    if isinstance(td, datetime.timedelta):
+        td = td.total_seconds()
+    hours, minutes = 0, 0
+    secs, fraction = divmod(td, 1)
+    secs = int(secs)
+    if secs >= 60:
+        # ignore fractional part, if dt is >= 1 min
+        fraction = 0
+    else:
+        # convert to msecs
+        fraction *= 1000
+
+    for singular, plural, period in (
+        ('year',    'years',    60 * 60 * 24 * 365),
+        ('month',   'months',   60 * 60 * 24 * 30),
+        ('week',    'weeks',    60 * 60 * 24 * 7),
+        ('day',     'days',     60 * 60 * 24),
+        ('hour',    'hours',    60 * 60),
+        ('minute',  'minutes',  60),
+        ('second',  'seconds',  1),
+    ):
+        if secs > period or period == 1:
+            val, secs = divmod(secs, period)
+            if short:
+                if period > 60 * 60:
+                    rv.append('%s%s' % (val, singular[0]))
+                elif period == 60 * 60:
+                    hours = val
+                elif period == 60:
+                    minutes = val
+                elif period == 1:
+                    if fraction:
+                        val = '%d.%03d' % (val, fraction)
+                    else:
+                        val = '%02d' % (val)
+            else:
+                if period == 1 and fraction:
+                    val = '%d.%03d' % (val, fraction)
+                if val == 1:
+                    rv.append('%s %s' % (val, singular))
+                else:
+                    rv.append('%s %s' % (val, plural))
+                if fuzzy:
+                    break
+
+    if short:
+        return ''.join(rv) + '%02d:%02d:%s' % (hours, minutes, val)
+    else:
+        # in 1 hour, 33 minutes, 12 seconds
+        # -> 1 hour, 33 minutes and 12 seconds
+        return ' and '.join(', '.join(rv).rsplit(', ', 1))
+
+
 def unquote(val, quotes = '\'"'):
     """ unquote string """
     for quote in quotes:
@@ -166,7 +218,7 @@ def assign_exp_dict(lines, lowercase = False, comment_skip = '#'):
             if lowercase:
                 var = var.lower()
             d[var] = val
-    log.debug(f'assign_exp_dict({lines}, {lowercase}, {comment_skip}): "{d}"')
+    log.trace(f'assign_exp_dict({lines}, {lowercase}, {comment_skip}): "{d}"')
     return d
 
 
@@ -221,10 +273,10 @@ class TFS:
                     break
         if max_result == 1 and result:
             result = result[0]
-        log.debug(f'TFS.search("{regexp}", max_result: {max_result}): "{result}"')
+        log.trace(f'TFS.search("{regexp}", max_result: {max_result}): "{result}"')
         return result
 
-    def match_key(self, key, max_result = 0, lines = None, sep = ':'):
+    def match_key(self, key, max_result = 0, lines = None, defval = None, sep = ':'):
         """ find matches of a space padded key, and return the value part,
             separated with sep and return a list of matches up to max_result
             * if lines is None, search self._lines
@@ -235,14 +287,16 @@ class TFS:
         if lines is None:
             lines = self._lines
         for line in lines:
-            mo = re.match(f'^\s*{key}\s*:\s*(.*)$', line)
+            mo = re.match(f'^\s*{key}\s*{sep}\s*(?P<match>.*)$', line)
             if mo:
-                result.append(mo.group(1))
+                result.append(mo['match'])
                 if max_result and len(result) >= max_result:
                     break
         if max_result == 1 and result:
             result = result[0]
-        log.debug(f'TFS.match_key("{key}", max_result: {max_result}, sep: "{sep}"): "{result}"')
+        if result == []:
+            result = defval
+        log.trace(f'TFS.match_key("{key}", max_result: {max_result}, sep: "{sep}"): "{result}"')
         return result
 
     def extract_lines(self, start_tag, end_tag, offset = 0, lines = None):
@@ -260,7 +314,7 @@ class TFS:
                 # fast forward
                 if lnr < offset:
                     continue
-                #log.debug(f'{lnr}: {line}')
+                log.trace(f'{lnr}: "{line}"')
                 # start the search
                 if not match:
                     if re.match(start_tag, line):
@@ -277,7 +331,7 @@ class TFS:
                         result.append(line)
             # prepare for continuation
             lnr += 1
-        log.debug(f'TFS.extract_lines("{start_tag}", "{end_tag}", offset: {offset}): {result}, {lnr}')
+        log.trace(f'TFS.extract_lines("{start_tag}", "{end_tag}", offset: {offset}): {result}, {lnr}')
         return result, lnr
 
     def extract_command(self, command, double_blank = False, lines = None):
@@ -303,7 +357,7 @@ class TFS:
                     break
         if len(result) == 1:
             result = result.pop()
-        log.debug(f'TFS.extract_command("{command}", double_blank: {double_blank}): {result}')
+        log.trace(f'TFS.extract_command("{command}", double_blank: {double_blank}): {result}')
         return result
 
     def __repr__(self):
@@ -319,6 +373,7 @@ class IRQ:
     nr: int
     count: int
     name: str
+    model: str = ''
     dist: float = 0.0
 
     def __init__(self, line):
@@ -332,6 +387,8 @@ class IRQ:
                 ('desc', str)
             ):
                 setattr(self, key, mod(gdict[key]))
+                if key == 'desc':
+                    log.debug(f'desc: {self.desc}')
             try:
                 _, _, self.name = self.desc.split(maxsplit = 2)
             except ValueError:
@@ -368,7 +425,7 @@ class NIC:
     link: bool
 
     def __init__(self, tfs, lines):
-        log.debug(f'NIC({tfs})')
+        log.trace(f'NIC({tfs})')
         for label, key, mod in (
             ('Model', 'model', unquote),
             ('Driver', 'driver', unquote),
@@ -381,12 +438,23 @@ class NIC:
             setattr(self, key, mod(val))
 
 
+onoff_dict = {
+    -1: 'UNDEF',
+    0: 'OFF',
+    1: 'ON',
+}
+
+class PPCError(Exception):
+    """ PPCErrors are raised from fatal parse errors """
+
 @dataclass
 class PPC:
     date: str
     hostname: str
     kernel: str
     os_ver: str
+    memory: str
+    shared_cpus: str
     cpu_count: int
     cpu_type: str
     model: str
@@ -403,6 +471,8 @@ class PPC:
     def __init__(self, fn):
         self.path = os.path.dirname(fn)
         self.lookup_basic_env()
+        self.lookup_memory()
+        self.lookup_lparcfg()
         tfs = TFS(fn)
         cpulist = tfs.extract_command('/proc/cpuinfo', double_blank = True)
         log.debug(f'{cpulist}')
@@ -442,6 +512,7 @@ class PPC:
 
             if one cpu runs more than twice the average number of interrupts,
             it's count is discarded
+            while at it, extract irq model: XICS or XIVE
         """
         log.debug(f'irq_dist({irq}, "{line}"), cpu_count: {self.cpu_count}')
         try:
@@ -456,7 +527,7 @@ class PPC:
             irqcount = sum(irqs)
             irqavg = irqcount/self.cpu_count
             cpuf = 100/self.cpu_count
-            log.info(f'irq: {irq.nr}: {irqs}, total {irqcount}')
+            log.debug(f'irq: {irq.nr}: {irqs}, total {irqcount}')
             log.debug(f'irqcount (avg.): {irqavg:.1f}, cpu factor: {cpuf:.2f}')
             if irq.count != irqcount:
                 log.warning(f'irq({irq.nr}): {irq.count:_} (rec) != {irqcount:_} (calc): interrupt count inconsistent')
@@ -465,7 +536,15 @@ class PPC:
                     irqdist += (ic / irqavg) * cpuf
             irqdist = round(irqdist, 1)
             irq.dist = irqdist
-            log.info(f'irq distribution: {irqdist}')
+            log.debug(f'irq distribution: {irqdist}')
+            # extract interrupt model
+            im, _ = desc.split(maxsplit = 1)
+            if im == 'XIVE-IRQ':
+                im = 'XIVE'
+            if im not in ('XICS', 'XIVE'):
+                log.warning(f'irq: {irq.nr}: unknown interrupt model: {im}')
+            irq.model = im
+            log.debug(f'irq: {irq.nr}: interrupt model: {im}')
 
     def lookup_nic(self, tfs):
         """ collect all nics """
@@ -492,9 +571,23 @@ class PPC:
             if result:
                 setattr(self, var, result['value'])
 
+    def lookup_lparcfg(self):
+        """ examine ppc64/lparcfg """
+        fn = os.path.join(self.path, gpar.lparfn)
+        if not os.path.exists(fn):
+            log.warning(f'{fn} not found')
+        else:
+            tfs = TFS(fn)
+            try:
+                spm = int(tfs.match_key('shared_processor_mode', 1, defval = -1, sep = '='))
+            except Exception as e:
+                log.exception(e)
+            else:
+                self.shared_cpus = onoff_dict.get(spm, 'UNKNOWN')
+
     def lookup_basic_env(self):
         """ fetch general parameter from basic environment """
-        fn = os.path.join(self.path, 'basic-environment.txt')
+        fn = os.path.join(self.path, gpar.befn)
         if not os.path.exists(fn):
             return
         tfs = TFS(fn)
@@ -509,17 +602,38 @@ class PPC:
             d = assign_exp_dict(osrel, True)
             self.os_ver = "{name} {version}".format(**d)
 
+    def lookup_memory(self):
+        fn = os.path.join(self.path, gpar.memfn)
+        if not os.path.exists(fn):
+            raise PPCError(f'{fn} not found')
+        tfs = TFS(fn)
+        meminfo = tfs.extract_command('/proc/meminfo')
+        log.debug(f'meminfo: {meminfo}')
+        # Memory in GB
+        mem = tfs.match_key('MemTotal', 1, meminfo)
+        if mem.endswith(' kB'):
+            mem = mem[:-3]
+        try:
+            mem = int(mem)
+        except ValueError:
+            log.warning('invalid MemTotal value from /proc/meminfo')
+        else:
+            self.memory = f'{fsizeof(mem * 1024, 2)} [{mem:,} KiB]'
+        log.debug(f'memory: {self.memory}')
+
     def __str__(self):
         return '%s(\n%s\n)' % (self.__class__.__name__, frec(self.__dict__))
 
 
 def process(args):
+    started = time.time()
+    scnr = 0
     ret = 0
     log.debug('started with pid %s in %s', os.getpid(), gpar.appdir)
 
     for path in args:
         log.debug(f'search {path}')
-        for fn in fnfind(gpar.hwfn, path):
+        for fn in fnfind(gpar.hwfn, path, False):
             log.debug(f'examine {fn}')
             # optimization: we just read line by line, until we hit
             # Architecture line. This avoids reading the whole file,
@@ -527,9 +641,15 @@ def process(args):
             for line in open(fn, encoding = 'utf-8'):
                 if line.startswith('Architecture'):
                     if gpar.arch in line.split():
-                        print(PPC(fn))
-                        print()
+                        ppc = PPC(fn)
+                        ll = log.getEffectiveLevel()
+                        log.setLevel(logging.INFO)
+                        log.info(ppc)
+                        log.setLevel(ll)
+                        scnr += 1
                     break
+
+    log.info('%s supportconfigs examined in %s', scnr, fdeltat(time.time() - started))
 
     return ret
 
@@ -551,21 +671,31 @@ def main(argv = None):
         if opt in ('-h', '--help'):
             exit(usage = True)
         elif opt in ('-V', '--version'):
-            exit(msg = 'version %s' % gpar.version)
+            exit(msg = 'version {}'.format(gpar.version))
         elif opt in ('-v', '--verbose'):
             if gpar.loglevel > logging.DEBUG:
                 gpar.loglevel -= 10
+            elif gpar.loglevel == logging.DEBUG:
+                gpar.loglevel = logging.TRACE
         elif opt in ('-l', '--logfile'):
             gpar.logfile = par
         elif opt in ('-f', '--force'):
             gpar.force = True
 
+    if not args:
+        exit(usage = True)
+
     setup_logging(gpar.logfile, gpar.loglevel)
 
     try:
         return process(args)
+    except SystemExit as e:
+        return e.code
     except KeyboardInterrupt:
-        return 3    # SIGQUIT
+        return 5
+    except:
+        log.exception('internal error:')
+        return 8
 
 
 if __name__ == '__main__':

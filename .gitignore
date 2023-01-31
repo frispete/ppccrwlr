@@ -1,0 +1,6 @@
+ppc-crawler.egg-info/
+__pycache__/
+dist/
+tmp/
+*.sw?
+*~
