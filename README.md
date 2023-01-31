@@ -1,4 +1,4 @@
-# ppc-crawler
+# ppccrwlr
 
 Crawl directories with supportconfigs for ppc64le cases, and collect some hardware aspects in order to recognize some regular appearing issues.
 
@@ -6,12 +6,15 @@ Crawl directories with supportconfigs for ppc64le cases, and collect some hardwa
 
 We see a couple of common PPC64LE failure patterns, that deserve further investigation. 
 
-- network thoughput limitation
+- network thoughput and latency
 - soft lock-ups 
 - high cpu usage
 
 The first is caused at least in part by a deficit of the `ibmveth` driver, that isn't able to distribute interrupts to multiple cpus properly.
-The official solution of IBM is to create a bonding -alb device with up to 8 interfaces. 
+The official solution of IBM is to create a bonding -alb device with up to 8 interfaces, or use SRIOV devices with the ibmvnic driver. Another 
+important detail is the interrupt engine: with the old XICS scheme, every interrupt is routed vi VIO to the LPAR, while the new XIVE scheme,
+interrupts are delivered from hardware to the LPAR directly. Also, some limitations, which core can handle them, are removed. XIVE requires
+POWER9 architecture and the LPAR needs to be set up with `Power9` mode, not `Power9base` mode.
 
 The causes of the second and third ones are not completely understood. Typically, the `sys` load is raising including the `steal` percentage, 
 and workqueues pile up. We want to examine, if kernel and firmware versions contribute to the problem.
@@ -22,9 +25,9 @@ the architecture is `ppc64le`. Then it also parses the `basic-environment.txt`.
 At that time, it just produces a condenced output similar to:
 ```
 PPC(
-     path: '.../SFSC00303987/scc_labbhn1_210903_0902'
+     path: '.../scc_labmnstr1_210903_0902'
      date: 'Fri Sep  3 09:03:12 CEST 2021'
- hostname: 'labbhn1'
+ hostname: 'labmnstr1'
    kernel: '4.12.14-150.72-default'
    os_ver: 'SLES 15'
 cpu_count: 16
@@ -34,8 +37,8 @@ cpu_count: 16
  platform: 'pSeries'
       irq: {19: IRQ(nr=19, count=16966701, name='eth0', dist=10.9),
             20: IRQ(nr=20, count=33817, name='eth1', dist=9.2)}
-      nic: {'eth0': NIC(model='IBM Virtual Ethernet card 1', driver='ibmveth', device='eth0', hwaddr='22:9f:89:ce:b0:02', hwaddrp='22:9f:89:ce:b0:02', link=True),
-            'eth1': NIC(model='IBM Virtual Ethernet card 0', driver='ibmveth', device='eth1', hwaddr='22:9f:89:ce:b0:03', hwaddrp='22:9f:89:ce:b0:03', link=True)}
+      nic: {'eth0': NIC(model='IBM Virtual Ethernet card 1', driver='ibmveth', device='eth0', hwaddr='22:9f:89:12:34:56', hwaddrp='22:9f:89:12:34:56', link=True),
+            'eth1': NIC(model='IBM Virtual Ethernet card 0', driver='ibmveth', device='eth1', hwaddr='22:9f:89:12:34:56', hwaddrp='22:9f:89:12:34:56', link=True)}
    fw_lvl: 'FW930.30 FW930.03 FW930.30'
    fw_dat: '20201007 20190809 20201007'
    fw_img: 'VH930_116 VH930_068 VH930_116'
@@ -62,7 +65,7 @@ In this example for IRQ 19: total number of interrupts: 16966701, average number
 
 The minimum supported Python version is 3.6.
 
-On `ziu.nue.suse.com`, you need to call this program by:
+On `ziu`, you need to call this program by:
 ```
 python3.6 ./ppc-crawler.py /srv/www/htdocs/SFSC<case-nr.>/
 ```

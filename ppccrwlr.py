@@ -92,7 +92,7 @@ def setup_logging(logfile, loglevel):
     """ Setup various aspects of logging facility """
     logconfig = dict(
         level = loglevel,
-        format = '%(asctime)s %(levelname)5s: [%(name)s] %(message)s',
+        format = '%(asctime)s %(levelname)5s: %(message)s',
         datefmt = '%Y-%m-%d %H:%M:%S',
     )
     if logfile not in (None, '-'):
@@ -644,7 +644,7 @@ def process(args):
                         ppc = PPC(fn)
                         ll = log.getEffectiveLevel()
                         log.setLevel(logging.INFO)
-                        log.info(ppc)
+                        log.info(str(ppc) + '\n')
                         log.setLevel(ll)
                         scnr += 1
                     break
