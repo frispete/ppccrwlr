@@ -454,7 +454,10 @@ class PPC:
     kernel: str
     os_ver: str
     memory: str
-    shared_cpus: str
+    part_cap: list
+    part_proc: list
+    part_affin: int
+    shared_proc: bool
     cpu_count: int
     cpu_type: str
     model: str
@@ -578,12 +581,22 @@ class PPC:
             log.warning(f'{fn} not found')
         else:
             tfs = TFS(fn)
-            try:
-                spm = int(tfs.match_key('shared_processor_mode', 1, defval = -1, sep = '='))
-            except Exception as e:
-                log.exception(e)
-            else:
-                self.shared_cpus = onoff_dict.get(spm, 'UNKNOWN')
+            self.part_cap = []
+            self.part_proc = []
+            for var, tag in (
+                ('part_cap', 'partition_entitled_capacity'),
+                ('part_cap', 'partition_max_entitled_capacity'),
+                ('part_proc', 'partition_active_processors'),
+                ('part_proc', 'partition_potential_processors'),
+            ):
+                val = int(tfs.match_key(tag, 1, defval = -1, sep = '='))
+                getattr(self, var).append(val)
+
+            # partition affinity score
+            self.part_affin = int(tfs.match_key('partition_affinity_score', 1, defval = -1, sep = '='))
+
+            # shared processor mode
+            self.shared_proc = bool(tfs.match_key('shared_processor_mode', 1, defval = -1, sep = '='))
 
     def lookup_basic_env(self):
         """ fetch general parameter from basic environment """
